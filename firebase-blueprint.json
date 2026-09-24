@@ -1,0 +1,75 @@
+{
+  "entities": {
+    "orders": {
+      "title": "Store Orders",
+      "description": "Store purchase orders for Minecraft server ranks, keys, and coins",
+      "type": "object",
+      "properties": {
+        "orderId": { "type": "string", "description": "Unique order ID (e.g. VTX-VC-XXXX-XXXX)" },
+        "securityPin": { "type": "string", "description": "Passcode/PIN for verification" },
+        "package": { "type": "string", "description": "Package or rank name" },
+        "tier": { "type": "string", "description": "Rank tier or category" },
+        "priceEgp": { "type": "string", "description": "Price in Egyptian Pounds" },
+        "priceUsd": { "type": "string", "description": "Price in USD" },
+        "paymentMethod": { "type": "string", "description": "Payment method used (e.g. Vodafone Cash)" },
+        "player": { "type": "string", "description": "Minecraft in-game name" },
+        "platform": { "type": "string", "enum": ["java", "bedrock"], "description": "Player Minecraft platform" },
+        "senderPhone": { "type": "string", "description": "Sender Vodafone Cash phone number" },
+        "transactionRef": { "type": "string", "description": "Transaction reference or status note" },
+        "adminRecipient": { "type": "string", "description": "Target admin recipient username" },
+        "timestamp": { "type": "string", "description": "Human readable order creation timestamp" },
+        "createdAt": { "type": "number", "description": "Creation timestamp in milliseconds" },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "accepted", "approved", "cancelled", "rejected", "completed"],
+          "description": "Status of the order"
+        },
+        "paymentProof": { "type": "string", "description": "Base64 or image URL of payment receipt" },
+        "paymentProofName": { "type": "string", "description": "Original image filename" },
+        "clientIp": { "type": "string", "description": "Client IP address" },
+        "rankCommand": { "type": "string", "description": "In-game LuckPerms delivery command" },
+        "staffNotes": { "type": "string", "description": "Staff notes on the order" },
+        "cancellationReason": { "type": "string", "description": "Reason for rejection if cancelled" },
+        "reviewedBy": { "type": "string", "description": "Staff member who reviewed the order" },
+        "reviewedAt": { "type": "string", "description": "Review date string" },
+        "reviewedTimestamp": { "type": "number", "description": "Review timestamp ms" },
+        "archived": { "type": "boolean", "description": "Whether the order is archived" },
+        "delivered": { "type": "boolean", "description": "Whether package was delivered in-game" },
+        "deliveredAt": { "type": "string", "description": "Delivery timestamp string" },
+        "commandExecuted": { "type": "string", "description": "Minecraft command executed for delivery" }
+      },
+      "required": ["orderId", "player", "package", "priceEgp", "status"]
+    },
+    "applications": {
+      "title": "Staff Applications",
+      "description": "Applications submitted by players to join server staff team",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique application ID" },
+        "minecraftUsername": { "type": "string", "description": "Applicant Minecraft username" },
+        "discordUsername": { "type": "string", "description": "Applicant Discord username" },
+        "age": { "type": "number", "description": "Applicant age" },
+        "role": { "type": "string", "description": "Applied role" },
+        "experience": { "type": "string", "description": "Past experience" },
+        "hoursPerWeek": { "type": "number", "description": "Hours available per week" },
+        "motivation": { "type": "string", "description": "Why they want to join" },
+        "scenarioAnswer": { "type": "string", "description": "Response to scenario" },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "under_review", "accepted", "rejected"],
+          "description": "Application status"
+        },
+        "submittedAt": { "type": "string", "description": "Human readable submission timestamp" },
+        "createdAt": { "type": "number", "description": "Creation timestamp in milliseconds" },
+        "notes": { "type": "string", "description": "Staff notes" },
+        "reviewedBy": { "type": "string", "description": "Reviewer name" },
+        "reviewedAt": { "type": "string", "description": "Review timestamp string" },
+        "reviewedTimestamp": { "type": "number", "description": "Review timestamp ms" },
+        "archived": { "type": "boolean", "description": "Whether archived" }
+      },
+      "required": ["id", "minecraftUsername", "discordUsername", "role", "status"]
+    }
+  },
+  "firestoreDatabaseId": "ai-studio-remixremixvortex-2198c675-91ac-419a-9796-337039342386",
+  "projectId": "glossy-continuity-lvd6f"
+}
