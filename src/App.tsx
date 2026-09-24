@@ -14,10 +14,12 @@ import { ConnectionModal } from './components/ConnectionModal';
 import { CraftingStoreCheckoutModal } from './components/CraftingStoreCheckoutModal';
 import { CraftingStoreBrowserModal } from './components/CraftingStoreBrowserModal';
 import { CraftingStoreConfigModal } from './components/CraftingStoreConfigModal';
+import { AuthModal } from './components/AuthModal';
 import { StaffApplyPortal } from './components/StaffApply/StaffApplyPortal';
 import { LanguageSwitcher } from './components/LanguageSwitcher';
 import { Language } from './translations';
-import { ServerStatusData, StorePackage } from './types';
+import { ServerStatusData, StorePackage, UserProfile } from './types';
+import { subscribeToUserProfile, syncUserPurchases } from './services/api';
 import { Check } from 'lucide-react';
 
 const SERVER_IP = 'vortexmc.xyz';
@@ -55,6 +57,37 @@ export default function App() {
   const [isCheckoutModalOpen, setIsCheckoutModalOpen] = useState(false);
   const [isBrowserModalOpen, setIsBrowserModalOpen] = useState(false);
   const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
+
+  // Customer Account (Google, Discord, Email) & Purchases Tracker state
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(() => {
+    try {
+      const saved = localStorage.getItem('vortex_user_profile');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+
+  // Real-time synchronization of customer profile & purchase count
+  useEffect(() => {
+    if (!currentUser?.uid) return;
+    const unsub = subscribeToUserProfile(currentUser.uid, (profile) => {
+      if (profile) {
+        setCurrentUser(profile);
+        localStorage.setItem('vortex_user_profile', JSON.stringify(profile));
+      }
+    });
+
+    // Auto-sync purchase count against all server orders
+    syncUserPurchases(currentUser.uid, currentUser.minecraftUsername, currentUser.email || undefined)
+      .then((count) => {
+        setCurrentUser((prev) => (prev ? { ...prev, purchaseCount: count } : null));
+      })
+      .catch(() => {});
+
+    return () => unsub();
+  }, [currentUser?.uid]);
 
   // Sync hash routing for staff apply
   useEffect(() => {
@@ -241,6 +274,8 @@ export default function App() {
         onCopyText={handleCopyText}
         language={language}
         onToggleLanguage={handleToggleLanguage}
+        currentUser={currentUser}
+        onOpenAuthModal={() => setIsAuthModalOpen(true)}
       />
 
       {/* Main Content Sections */}
@@ -316,6 +351,21 @@ export default function App() {
         onClose={() => setIsConfigModalOpen(false)}
         currentUrl={storeUrl}
         onSaveUrl={handleSaveStoreUrl}
+      />
+
+      {/* Customer Account & Purchases Tracker Modal */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        currentUser={currentUser}
+        onUserChanged={(user) => setCurrentUser(user)}
+        onCopyText={handleCopyText}
+        onOpenStore={() => {
+          const storeEl = document.getElementById('store');
+          if (storeEl) {
+            storeEl.scrollIntoView({ behavior: 'smooth' });
+          }
+        }}
       />
 
       {/* Toast Notification */}

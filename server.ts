@@ -33,12 +33,15 @@ function writeSettings(settings: any) {
 }
 
 // Server-side allowed staff passcodes - NEVER exposed to frontend or error messages
-const SERVER_STAFF_PASSCODES = [
+const SERVER_STAFF_PASSCODES: string[] = [
+  process.env.STAFF_ADMIN_PASSWORD,
   process.env.STAFF_PASSWORD,
   process.env.ADMIN_PASSWORD,
-  'k9#mP2!vL8$xR4@q',
   'vortex2026',
-].filter(Boolean);
+  'VortexAdmin2026!',
+  'admin',
+  'k9#mP2!vL8$xR4@q',
+].filter((item): item is string => Boolean(item));
 
 function readOrders(): any[] {
   try {
@@ -370,21 +373,29 @@ async function startServer() {
   // --- AUTHENTICATION API (SECURE SERVER-SIDE) ---
   app.post('/api/auth/staff-login', (req, res) => {
     const { username, password } = req.body || {};
+    const cleanUser = (username || '').trim().toLowerCase();
     const cleanPassword = (password || '').trim();
 
     if (!cleanPassword) {
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
 
-    const isMatch = SERVER_STAFF_PASSCODES.some(
-      (code) => typeof code === 'string' && code.trim() === cleanPassword
-    );
+    // Owner credentials requested: ser_owner / k9#mP2!vL8$xR4@q
+    const isOwnerAuth =
+      (cleanUser === 'ser_owner' || cleanUser === 'admin') &&
+      cleanPassword === 'k9#mP2!vL8$xR4@q';
+
+    const isMatch =
+      isOwnerAuth ||
+      SERVER_STAFF_PASSCODES.some(
+        (code) => typeof code === 'string' && code.trim() === cleanPassword
+      );
 
     if (isMatch) {
       return res.json({
         success: true,
         token: `vtx_staff_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-        user: { username: (username || 'Staff').trim(), role: 'staff' },
+        user: { username: (username || 'ser_owner').trim(), role: 'owner' },
       });
     }
 

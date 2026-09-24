@@ -7,7 +7,7 @@ import {
   Trash2, Eye, Download
 } from 'lucide-react';
 import { StorePackage, StoreOrder } from '../types';
-import { submitOrder, fetchClientIp } from '../services/api';
+import { submitOrder, fetchClientIp, recordUserPurchase } from '../services/api';
 
 interface CraftingStoreCheckoutModalProps {
   isOpen: boolean;
@@ -335,8 +335,23 @@ export const CraftingStoreCheckoutModal: React.FC<CraftingStoreCheckoutModalProp
       rankCommand,
     };
 
+    // Link with logged-in customer account if present
+    try {
+      const savedUserStr = localStorage.getItem('vortex_user_profile');
+      if (savedUserStr) {
+        const u = JSON.parse(savedUserStr);
+        if (u && u.uid) {
+          orderData.userId = u.uid;
+          if (u.email) orderData.userEmail = u.email;
+        }
+      }
+    } catch {}
+
     try {
       await submitOrder(orderData);
+      if (orderData.userId) {
+        recordUserPurchase(orderData.userId, orderData).catch(() => {});
+      }
     } catch (e) {
       console.error('Failed to submit order', e);
     }

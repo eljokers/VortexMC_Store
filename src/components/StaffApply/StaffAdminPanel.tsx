@@ -58,7 +58,7 @@ export const StaffAdminPanel: React.FC<StaffAdminPanelProps> = ({
 
   // Primary staff authentication state (Firebase Auth & Secure Server Backend)
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [adminUsername, setAdminUsername] = useState('admin');
+  const [adminUsername, setAdminUsername] = useState('ser_owner');
   const [adminPassword, setAdminPassword] = useState('');
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [authError, setAuthError] = useState('');

@@ -76,6 +76,23 @@ export interface StoreOrder {
   paymentProofName?: string;
   clientIp?: string;
   rankCommand?: string;
+  userId?: string;
+  userEmail?: string;
+}
+
+export interface UserProfile {
+  uid: string;
+  email: string | null;
+  displayName: string | null;
+  photoURL: string | null;
+  minecraftUsername?: string;
+  provider: 'google' | 'discord' | 'email' | 'anonymous';
+  discordId?: string;
+  discordTag?: string;
+  purchaseCount: number;
+  totalSpentEgp?: number;
+  createdAt: string;
+  lastLoginAt: string;
 }
 
 export interface StaffApplication {

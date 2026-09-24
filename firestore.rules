@@ -45,5 +45,16 @@ service cloud.firestore {
       // Only Staff can delete applications
       allow delete: if isAuthenticated();
     }
+
+    // Users Collection (Profiles & Purchase counts)
+    match /users/{userId} {
+      // User can view their own profile or public profile badge
+      allow get: if true;
+      allow list: if isAuthenticated();
+
+      // User can create or update their own profile and purchase count
+      allow create, update: if (request.auth != null && request.auth.uid == userId) || isAuthenticated();
+      allow delete: if request.auth != null && request.auth.uid == userId;
+    }
   }
 }

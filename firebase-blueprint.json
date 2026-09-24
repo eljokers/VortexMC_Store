@@ -68,6 +68,26 @@
         "archived": { "type": "boolean", "description": "Whether archived" }
       },
       "required": ["id", "minecraftUsername", "discordUsername", "role", "status"]
+    },
+    "users": {
+      "title": "User Profiles",
+      "description": "User accounts logged in via Google, Discord, or Email with purchase counts",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Unique user ID" },
+        "email": { "type": "string", "description": "User email address" },
+        "displayName": { "type": "string", "description": "User display name" },
+        "photoURL": { "type": "string", "description": "Avatar URL" },
+        "minecraftUsername": { "type": "string", "description": "Linked Minecraft IGN" },
+        "provider": { "type": "string", "enum": ["google", "discord", "email", "anonymous"], "description": "Login provider" },
+        "discordId": { "type": "string", "description": "Discord User ID" },
+        "discordTag": { "type": "string", "description": "Discord username / tag" },
+        "purchaseCount": { "type": "number", "description": "Total count of store orders made by this user" },
+        "totalSpentEgp": { "type": "number", "description": "Total Egyptian pounds spent" },
+        "createdAt": { "type": "string", "description": "Account creation date" },
+        "lastLoginAt": { "type": "string", "description": "Last login timestamp" }
+      },
+      "required": ["uid", "provider", "purchaseCount"]
     }
   },
   "firestoreDatabaseId": "ai-studio-remixremixvortex-2198c675-91ac-419a-9796-337039342386",

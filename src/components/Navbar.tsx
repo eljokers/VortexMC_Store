@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Copy, Check, Menu, X, ExternalLink, Monitor, Smartphone, ChevronDown, Sparkles } from 'lucide-react';
-import { ServerStatusData } from '../types';
+import { Copy, Check, Menu, X, ExternalLink, Monitor, Smartphone, ChevronDown, Sparkles, User, ShoppingBag, LogIn } from 'lucide-react';
+import { ServerStatusData, UserProfile } from '../types';
 import { Language, translations } from '../translations';
 import { LanguageSwitcher } from './LanguageSwitcher';
 
@@ -15,6 +15,8 @@ interface NavbarProps {
   onCopyText?: (text: string, customMessage?: string) => void;
   language?: Language;
   onToggleLanguage?: (lang: Language) => void;
+  currentUser?: UserProfile | null;
+  onOpenAuthModal?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -28,6 +30,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   onCopyText,
   language = 'en',
   onToggleLanguage,
+  currentUser,
+  onOpenAuthModal,
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [showNavIpDropdown, setShowNavIpDropdown] = useState(false);
@@ -147,6 +151,50 @@ export const Navbar: React.FC<NavbarProps> = ({
               onToggleLanguage={onToggleLanguage}
               position="inline"
             />
+          )}
+
+          {/* User Profile or Login Trigger */}
+          {onOpenAuthModal && (
+            currentUser ? (
+              <button
+                type="button"
+                onClick={onOpenAuthModal}
+                className="inline-flex items-center gap-2 border border-purple-500/40 bg-purple-950/40 hover:bg-purple-900/50 text-white px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl cursor-pointer font-bold text-xs sm:text-sm transition-all duration-200 shadow-sm"
+                title={isAr ? `حسابك: ${currentUser.purchaseCount} مشتريات` : `Account: ${currentUser.purchaseCount} purchases`}
+              >
+                <img
+                  src={
+                    currentUser.photoURL ||
+                    (currentUser.minecraftUsername
+                      ? `https://mc-heads.net/avatar/${encodeURIComponent(currentUser.minecraftUsername)}/24`
+                      : 'https://mc-heads.net/avatar/MHF_Steve/24')
+                  }
+                  alt="Avatar"
+                  className="w-5 h-5 rounded-lg bg-slate-800 border border-purple-400/50 object-cover"
+                  referrerPolicy="no-referrer"
+                  onError={(e) => {
+                    (e.currentTarget as HTMLImageElement).src = 'https://mc-heads.net/avatar/MHF_Steve/24';
+                  }}
+                />
+                <span className="hidden sm:inline font-bold truncate max-w-[85px]">
+                  {currentUser.displayName || currentUser.minecraftUsername || 'Player'}
+                </span>
+                <span className="inline-flex items-center gap-1 text-[10px] font-black text-[#39f77e] bg-[#39f77e]/15 border border-[#39f77e]/30 px-1.5 py-0.5 rounded-md font-mono">
+                  <ShoppingBag className="w-3 h-3 text-[#39f77e]" />
+                  <span>{currentUser.purchaseCount}</span>
+                </span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={onOpenAuthModal}
+                className="inline-flex items-center gap-1.5 border border-white/20 bg-white/5 hover:bg-white/10 text-slate-200 hover:text-white px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl cursor-pointer font-bold text-xs sm:text-sm transition-all duration-200 shadow-sm"
+                title={isAr ? 'تسجيل الدخول أو إنشاء حساب' : 'Sign in / Register'}
+              >
+                <LogIn className="w-4 h-4 text-[#00d2ff]" />
+                <span className="hidden sm:inline">{isAr ? 'دخول / حساب' : 'Sign In'}</span>
+              </button>
+            )
           )}
 
           <button
@@ -364,6 +412,31 @@ export const Navbar: React.FC<NavbarProps> = ({
             </a>
 
             <div className="pt-3 border-t border-white/10 flex flex-col gap-2">
+              {onOpenAuthModal && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    onOpenAuthModal();
+                  }}
+                  className="w-full py-2.5 px-3 rounded-xl bg-purple-600/20 border border-purple-500/40 text-white font-bold flex items-center justify-between cursor-pointer"
+                >
+                  <div className="flex items-center gap-2">
+                    <User className="w-4 h-4 text-[#00d2ff]" />
+                    <span>
+                      {currentUser
+                        ? `${currentUser.displayName || currentUser.minecraftUsername || 'Player'}`
+                        : (isAr ? 'تسجيل الدخول / إنشاء حساب' : 'Sign In / Register')}
+                    </span>
+                  </div>
+                  {currentUser && (
+                    <span className="text-xs text-[#39f77e] font-mono font-black bg-[#39f77e]/10 px-2 py-0.5 rounded-full border border-[#39f77e]/20">
+                      {currentUser.purchaseCount} {isAr ? 'مشتريات' : 'purchases'}
+                    </span>
+                  )}
+                </button>
+              )}
+
               <button
                 onClick={() => {
                   setMobileMenuOpen(false);

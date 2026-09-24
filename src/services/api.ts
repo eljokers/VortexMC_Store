@@ -1,4 +1,4 @@
-import { StoreOrder, OrderStatus, StaffApplication, ApplicationStatus } from '../types';
+import { StoreOrder, OrderStatus, StaffApplication, ApplicationStatus, UserProfile } from '../types';
 import { db, auth } from '../firebase';
 import {
   collection,
@@ -10,10 +10,15 @@ import {
   deleteDoc,
   onSnapshot,
   query,
+  increment,
   Unsubscribe,
 } from 'firebase/firestore';
 import {
   signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  updateProfile,
+  signInWithPopup,
+  GoogleAuthProvider,
   signOut as fbSignOut,
   onAuthStateChanged,
   signInAnonymously,
@@ -782,4 +787,281 @@ export async function staffLogout(): Promise<void> {
   } catch {
     // ignore
   }
+}
+
+/**
+ * Sync user's purchase count from orders collection:
+ * Finds all orders matching userId, userEmail, or minecraftUsername.
+ */
+export async function syncUserPurchases(uid: string, ign?: string, email?: string): Promise<number> {
+  try {
+    const orders = await fetchOrders();
+    const cleanIgn = (ign || '').trim().toLowerCase();
+    const cleanEmail = (email || '').trim().toLowerCase();
+
+    const matchingOrders = orders.filter((o) => {
+      if (o.userId && o.userId === uid) return true;
+      if (cleanEmail && o.userEmail && o.userEmail.toLowerCase() === cleanEmail) return true;
+      if (cleanIgn && o.player && o.player.toLowerCase() === cleanIgn) return true;
+      return false;
+    });
+
+    const count = matchingOrders.length;
+    // Update users/{uid} in Firestore
+    const userRef = doc(db, 'users', uid);
+    await updateDoc(userRef, {
+      purchaseCount: count,
+      lastLoginAt: new Date().toISOString(),
+    }).catch(async () => {
+      await setDoc(userRef, {
+        uid,
+        purchaseCount: count,
+        lastLoginAt: new Date().toISOString(),
+      }, { merge: true });
+    });
+
+    return count;
+  } catch (err) {
+    console.warn('syncUserPurchases error:', err);
+    return 0;
+  }
+}
+
+/**
+ * Increment user purchase count when an order is created or completed
+ */
+export async function recordUserPurchase(uid: string, orderData: Partial<StoreOrder>): Promise<void> {
+  try {
+    const userRef = doc(db, 'users', uid);
+    await setDoc(userRef, {
+      uid,
+      purchaseCount: increment(1),
+      lastLoginAt: new Date().toISOString(),
+    }, { merge: true });
+  } catch (err) {
+    console.warn('recordUserPurchase error:', err);
+  }
+}
+
+/**
+ * Fetch UserProfile from Firestore
+ */
+export async function getUserProfile(uid: string): Promise<UserProfile | null> {
+  try {
+    const userSnap = await getDoc(doc(db, 'users', uid));
+    if (userSnap.exists()) {
+      return userSnap.data() as UserProfile;
+    }
+  } catch (err) {
+    console.warn('getUserProfile error:', err);
+  }
+  return null;
+}
+
+/**
+ * Real-time listener for User Profile
+ */
+export function subscribeToUserProfile(uid: string, callback: (profile: UserProfile | null) => void): Unsubscribe {
+  const userRef = doc(db, 'users', uid);
+  return onSnapshot(userRef, (snapshot) => {
+    if (snapshot.exists()) {
+      callback(snapshot.data() as UserProfile);
+    } else {
+      callback(null);
+    }
+  }, (err) => {
+    console.warn('subscribeToUserProfile error:', err);
+  });
+}
+
+/**
+ * Sign In with Google (Real Firebase GoogleAuthProvider)
+ */
+export async function signInWithGoogle(minecraftIgn?: string): Promise<UserProfile> {
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: 'select_account' });
+  const result = await signInWithPopup(auth, provider);
+  const fbUser = result.user;
+
+  // Calculate purchase count from existing orders
+  const existingOrders = await fetchOrders();
+  const cleanEmail = (fbUser.email || '').toLowerCase();
+  const cleanIgn = (minecraftIgn || '').toLowerCase();
+  const count = existingOrders.filter((o) =>
+    (cleanEmail && o.userEmail?.toLowerCase() === cleanEmail) ||
+    (cleanIgn && o.player?.toLowerCase() === cleanIgn) ||
+    o.userId === fbUser.uid
+  ).length;
+
+  const profile: UserProfile = {
+    uid: fbUser.uid,
+    email: fbUser.email,
+    displayName: fbUser.displayName || 'Minecraft Player',
+    photoURL: fbUser.photoURL,
+    minecraftUsername: minecraftIgn || undefined,
+    provider: 'google',
+    purchaseCount: count,
+    createdAt: new Date().toISOString(),
+    lastLoginAt: new Date().toISOString(),
+  };
+
+  const userRef = doc(db, 'users', fbUser.uid);
+  await setDoc(userRef, profile, { merge: true });
+  localStorage.setItem('vortex_user_profile', JSON.stringify(profile));
+  if (minecraftIgn) localStorage.setItem('vortex_mc_ign', minecraftIgn);
+
+  return profile;
+}
+
+/**
+ * Sign In or Register with Discord (Real Discord profile binding)
+ */
+export async function signInWithDiscord(discordInfo: {
+  id: string;
+  username: string;
+  avatar?: string;
+  minecraftIgn?: string;
+}): Promise<UserProfile> {
+  let currentUser = auth.currentUser;
+  if (!currentUser) {
+    try {
+      const cred = await signInAnonymously(auth);
+      currentUser = cred.user;
+    } catch {
+      // fallback
+    }
+  }
+
+  const uid = currentUser?.uid || `discord_${discordInfo.id}`;
+  const avatarUrl = discordInfo.avatar
+    ? `https://cdn.discordapp.com/avatars/${discordInfo.id}/${discordInfo.avatar}.png`
+    : `https://cdn.discordapp.com/embed/avatars/${parseInt(discordInfo.id.slice(-1) || '0', 10) % 5}.png`;
+
+  // Calculate purchase count
+  const existingOrders = await fetchOrders();
+  const cleanIgn = (discordInfo.minecraftIgn || '').toLowerCase();
+  const count = existingOrders.filter((o) =>
+    (cleanIgn && o.player?.toLowerCase() === cleanIgn) ||
+    o.userId === uid
+  ).length;
+
+  const profile: UserProfile = {
+    uid,
+    email: `${discordInfo.username.replace(/[^a-zA-Z0-9_]/g, '')}@discord.user`,
+    displayName: discordInfo.username,
+    photoURL: avatarUrl,
+    minecraftUsername: discordInfo.minecraftIgn || undefined,
+    provider: 'discord',
+    discordId: discordInfo.id,
+    discordTag: discordInfo.username,
+    purchaseCount: count,
+    createdAt: new Date().toISOString(),
+    lastLoginAt: new Date().toISOString(),
+  };
+
+  const userRef = doc(db, 'users', uid);
+  await setDoc(userRef, profile, { merge: true });
+  localStorage.setItem('vortex_user_profile', JSON.stringify(profile));
+  if (discordInfo.minecraftIgn) localStorage.setItem('vortex_mc_ign', discordInfo.minecraftIgn);
+
+  return profile;
+}
+
+/**
+ * Register with Email & Password
+ */
+export async function registerWithEmail(
+  email: string,
+  pass: string,
+  minecraftIgn: string,
+  displayName?: string
+): Promise<UserProfile> {
+  const cred = await createUserWithEmailAndPassword(auth, email, pass);
+  const fbUser = cred.user;
+
+  if (displayName || minecraftIgn) {
+    await updateProfile(fbUser, {
+      displayName: displayName || minecraftIgn,
+      photoURL: `https://mc-heads.net/avatar/${encodeURIComponent(minecraftIgn || 'MHF_Steve')}/64`,
+    }).catch(() => {});
+  }
+
+  // Calculate purchase count
+  const existingOrders = await fetchOrders();
+  const cleanEmail = email.toLowerCase();
+  const cleanIgn = minecraftIgn.toLowerCase();
+  const count = existingOrders.filter((o) =>
+    o.userEmail?.toLowerCase() === cleanEmail ||
+    o.player?.toLowerCase() === cleanIgn ||
+    o.userId === fbUser.uid
+  ).length;
+
+  const profile: UserProfile = {
+    uid: fbUser.uid,
+    email: fbUser.email,
+    displayName: displayName || minecraftIgn,
+    photoURL: `https://mc-heads.net/avatar/${encodeURIComponent(minecraftIgn || 'MHF_Steve')}/64`,
+    minecraftUsername: minecraftIgn,
+    provider: 'email',
+    purchaseCount: count,
+    createdAt: new Date().toISOString(),
+    lastLoginAt: new Date().toISOString(),
+  };
+
+  const userRef = doc(db, 'users', fbUser.uid);
+  await setDoc(userRef, profile, { merge: true });
+  localStorage.setItem('vortex_user_profile', JSON.stringify(profile));
+  localStorage.setItem('vortex_mc_ign', minecraftIgn);
+
+  return profile;
+}
+
+/**
+ * Login with Email & Password
+ */
+export async function loginWithEmail(email: string, pass: string): Promise<UserProfile> {
+  const cred = await signInWithEmailAndPassword(auth, email, pass);
+  const fbUser = cred.user;
+
+  const profileDoc = await getUserProfile(fbUser.uid);
+  if (profileDoc) {
+    const count = await syncUserPurchases(fbUser.uid, profileDoc.minecraftUsername, fbUser.email || undefined);
+    const updated = { ...profileDoc, purchaseCount: count, lastLoginAt: new Date().toISOString() };
+    localStorage.setItem('vortex_user_profile', JSON.stringify(updated));
+    return updated;
+  }
+
+  const existingOrders = await fetchOrders();
+  const cleanEmail = (fbUser.email || '').toLowerCase();
+  const count = existingOrders.filter((o) =>
+    (cleanEmail && o.userEmail?.toLowerCase() === cleanEmail) ||
+    o.userId === fbUser.uid
+  ).length;
+
+  const profile: UserProfile = {
+    uid: fbUser.uid,
+    email: fbUser.email,
+    displayName: fbUser.displayName || 'Vortex Player',
+    photoURL: fbUser.photoURL,
+    provider: 'email',
+    purchaseCount: count,
+    createdAt: new Date().toISOString(),
+    lastLoginAt: new Date().toISOString(),
+  };
+
+  const userRef = doc(db, 'users', fbUser.uid);
+  await setDoc(userRef, profile, { merge: true });
+  localStorage.setItem('vortex_user_profile', JSON.stringify(profile));
+
+  return profile;
+}
+
+/**
+ * User Logout
+ */
+export async function userLogout(): Promise<void> {
+  try {
+    await fbSignOut(auth);
+  } catch {}
+  localStorage.removeItem('vortex_user_profile');
 }
