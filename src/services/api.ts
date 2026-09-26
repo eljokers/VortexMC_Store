@@ -90,6 +90,12 @@ export function subscribeToOrders(
       },
       (err) => {
         console.warn('Firestore orders snapshot listener notice:', err);
+        try {
+          const saved = localStorage.getItem('vortex_orders');
+          if (saved) {
+            onUpdate(sanitizeOrders(JSON.parse(saved)));
+          }
+        } catch {}
         if (onError) onError(err);
       }
     );
@@ -185,27 +191,37 @@ export async function submitOrder(order: StoreOrder): Promise<StoreOrder> {
     createdAt: order.createdAt || Date.now(),
   };
 
-  // 1. Save directly to Cloud Firestore
+  // 1. Save directly to Cloud Firestore with safety timeout
   try {
     const orderDocRef = doc(db, 'orders', cleanOrder.orderId);
-    await setDoc(orderDocRef, cleanOrder);
+    await Promise.race([
+      setDoc(orderDocRef, cleanOrder),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore write timeout')), 4000)),
+    ]);
   } catch (e) {
     console.warn('Firestore direct write notice:', e);
   }
 
   // 2. Dispatch secure server-side Discord notification with receipt attachment
   try {
+    const notifyCtrl = new AbortController();
+    const notifyTimeout = setTimeout(() => notifyCtrl.abort(), 3500);
     fetch('/api/discord/notify-order', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal: notifyCtrl.signal,
       body: JSON.stringify({
         order: cleanOrder,
         imageBase64: cleanOrder.paymentProof,
         imageName: cleanOrder.paymentProofName,
       }),
-    }).catch((err) => {
-      console.warn('Discord notify dispatch notice:', err);
-    });
+    })
+      .catch((err) => {
+        console.warn('Discord notify dispatch notice:', err);
+      })
+      .finally(() => {
+        clearTimeout(notifyTimeout);
+      });
   } catch {
     // ignore
   }
@@ -724,8 +740,23 @@ export async function cleanMockApplicationsApi(): Promise<void> {
 }
 
 /**
+ * Staff Token Helper (Stored in sessionStorage - NEVER in localStorage or frontend bundle)
+ */
+export function getStaffToken(): string | null {
+  try {
+    return sessionStorage.getItem('vortex_staff_token');
+  } catch {
+    return null;
+  }
+}
+
+export function isStaffSessionActive(): boolean {
+  return Boolean(getStaffToken());
+}
+
+/**
  * SECURE STAFF LOGIN:
- * Authenticates staff with Firebase Auth and/or secure server-side verification.
+ * Authenticates staff with secure server-side verification.
  * Under NO circumstances does it leak or return passwords in error messages.
  */
 export async function staffLoginWithCredentials(
@@ -739,18 +770,7 @@ export async function staffLoginWithCredentials(
     return { success: false, error: 'بيانات الدخول غير صحيحة' };
   }
 
-  // 1. Try Firebase Authentication first if email format
-  const email = cleanId.includes('@') ? cleanId : `${cleanId || 'admin'}@vortexmc.xyz`;
-  try {
-    const cred = await signInWithEmailAndPassword(auth, email, cleanPass);
-    if (cred.user) {
-      return { success: true };
-    }
-  } catch {
-    // Firebase Auth direct signin failed, try backend verification
-  }
-
-  // 2. Server-side verification (compares password securely on server, not in browser bundle)
+  // 1. Server-side verification (verifies credentials securely on server, never exposes password to client)
   try {
     const res = await fetch('/api/auth/staff-login', {
       method: 'POST',
@@ -760,8 +780,11 @@ export async function staffLoginWithCredentials(
 
     if (res.ok) {
       const data = await res.json();
-      if (data && data.success) {
-        // Authenticate with Firebase Auth anonymously so Firestore Security Rules allow staff operations
+      if (data && data.success && data.token) {
+        // Store session token in sessionStorage (NEVER in localStorage as requested)
+        sessionStorage.setItem('vortex_staff_token', data.token);
+
+        // Sign in anonymously in Firebase Auth for context
         try {
           await signInAnonymously(auth);
         } catch {
@@ -774,6 +797,19 @@ export async function staffLoginWithCredentials(
     console.warn('Backend login check notice:', e);
   }
 
+  // 2. Optional direct email authentication if staff has Firebase Auth email
+  if (cleanId.includes('@')) {
+    try {
+      const cred = await signInWithEmailAndPassword(auth, cleanId, cleanPass);
+      if (cred.user) {
+        sessionStorage.setItem('vortex_staff_token', `fb_${cred.user.uid}`);
+        return { success: true };
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   // Generic secure error message - NEVER reveals the password or code
   return { success: false, error: 'بيانات الدخول غير صحيحة' };
 }
@@ -782,12 +818,41 @@ export async function staffLoginWithCredentials(
  * Staff logout
  */
 export async function staffLogout(): Promise<void> {
+  const token = getStaffToken();
+  if (token) {
+    try {
+      fetch('/api/auth/staff-logout', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+      }).catch(() => {});
+    } catch {}
+  }
+  try {
+    sessionStorage.removeItem('vortex_staff_token');
+  } catch {}
   try {
     await fbSignOut(auth);
-  } catch {
-    // ignore
-  }
+  } catch {}
 }
+
+/**
+ * Fetch Discord OAuth Authorization URL from server
+ */
+export async function fetchDiscordOAuthUrl(): Promise<{ configured: boolean; url?: string; message?: string }> {
+  try {
+    const res = await fetch('/api/auth/discord/url');
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (err) {
+    console.warn('Failed to fetch Discord OAuth URL:', err);
+  }
+  return { configured: false, message: 'تعذر الاتصال بخادم المصادقة' };
+}
+
 
 /**
  * Sync user's purchase count from orders collection:

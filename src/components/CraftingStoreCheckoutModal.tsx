@@ -48,17 +48,10 @@ const processImageFile = (file: File): Promise<{ base64: string; sizeText: strin
         return;
       }
 
-      // If file is already smaller than 1.5MB, resolve directly
-      if (file.size < 1.5 * 1024 * 1024) {
-        const sizeText = file.size > 1024 ? `${Math.round(file.size / 1024)} KB` : `${file.size} B`;
-        resolve({ base64: result, sizeText });
-        return;
-      }
-
-      // Scale down large photos using HTML5 Canvas to prevent excessive payload size
+      // Scale and compress photos using HTML5 Canvas to ensure safe size (< 200KB) for Firestore and Discord
       const img = new Image();
       img.onload = () => {
-        const maxDimension = 1800;
+        const maxDimension = 1000;
         let width = img.width;
         let height = img.height;
 
@@ -82,7 +75,7 @@ const processImageFile = (file: File): Promise<{ base64: string; sizeText: strin
         }
 
         ctx.drawImage(img, 0, 0, width, height);
-        const compressedBase64 = canvas.toDataURL('image/jpeg', 0.88);
+        const compressedBase64 = canvas.toDataURL('image/jpeg', 0.72);
         const estSize = Math.round((compressedBase64.length * 3) / 4 / 1024);
         resolve({ base64: compressedBase64, sizeText: `${estSize} KB` });
       };
@@ -130,20 +123,16 @@ export const CraftingStoreCheckoutModal: React.FC<CraftingStoreCheckoutModalProp
   const [checkoutStep, setCheckoutStep] = useState<1 | 2>(1);
 
   // Final Order state
+  const isSubmittingRef = React.useRef(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [orderSubmitted, setOrderSubmitted] = useState(false);
   const [orderId, setOrderId] = useState('');
   const [securityPin, setSecurityPin] = useState('');
   const [copiedTarget, setCopiedTarget] = useState<string | null>(null);
 
-  // Webhook for sending directly to #passcode in Discord
-  const [webhookUrl, setWebhookUrl] = useState(() => {
-    return localStorage.getItem('vortex_discord_passcode_webhook') || '';
-  });
+  // Server-side notification status
   const [webhookStatus, setWebhookStatus] = useState<'idle' | 'sending' | 'sent' | 'failed'>('idle');
-  const [showWebhookSetup, setShowWebhookSetup] = useState(false);
-  const [tempWebhookInput, setTempWebhookInput] = useState('');
-  const [webhookSavedNotice, setWebhookSavedNotice] = useState(false);
+  const [confirmationNotice, setConfirmationNotice] = useState<{ title: string; desc: string; type: 'success' | 'info' } | null>(null);
 
   // Dynamic Security Passcode generator - guarantees 100% unique, changing codes on every trigger
   const generateDynamicSecurityCodes = () => {
@@ -291,6 +280,10 @@ export const CraftingStoreCheckoutModal: React.FC<CraftingStoreCheckoutModalProp
     e.preventDefault();
 
     if (!username.trim()) return;
+    // Guard against rapid duplicate clicks
+    if (isSubmittingRef.current || isSubmitting || orderSubmitted) return;
+    isSubmittingRef.current = true;
+
     localStorage.setItem('vortex_mc_ign', username.trim());
 
     setIsSubmitting(true);
@@ -356,129 +349,58 @@ export const CraftingStoreCheckoutModal: React.FC<CraftingStoreCheckoutModalProp
       console.error('Failed to submit order', e);
     }
 
-    // Try posting to Discord Webhook for #passcode channel (handles server proxy & client fallback)
-    const activeWebhook = webhookUrl.trim() || localStorage.getItem('vortex_discord_passcode_webhook');
+    // Server-side Discord notification dispatcher with attached receipt image
+    // Wrapped in try...catch and timeout controller to prevent hanging if webhook is blocked in preview
     setWebhookStatus('sending');
+    let notificationDispatched = false;
+
     try {
-      // Trigger server-side discord notification dispatcher with receipt image
-      fetch('/api/discord/notify-order', {
+      const abortCtrl = new AbortController();
+      const abortTimeout = setTimeout(() => abortCtrl.abort(), 2800);
+
+      const notifyRes = await fetch('/api/discord/notify-order', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: abortCtrl.signal,
         body: JSON.stringify({
           order: orderData,
           imageBase64: paymentProofBase64 || undefined,
           imageName: paymentProofName || `receipt_${newOrderId}.png`,
         }),
-      }).catch(() => {});
+      });
+      clearTimeout(abortTimeout);
 
-      if (activeWebhook) {
-        const payload = {
-          content: `🛡️ **[VortexMC - إثبات كود الأمان وإيصال الدفع في #passcode]**\n👑 **موجه مباشرة إلى مسؤول الرتب والدفع:** <@${OWNER_DISCORD}> (@${OWNER_DISCORD})\n🛡️ **إدارة السيرفر:** @${CO_OWNER_DISCORD}\n🔑 كود الأمان: **\`${newPasscode}\`** | 👤 اللاعب: **${targetPlayer}** (${platform.toUpperCase()}) | 💰 المبلغ: **${pkg.egpPrice}**\n📸 صورة إيصال التحويل مرفقة بالأسفل 👇`,
-          embeds: [
-            {
-              title: `🛡️ [VortexMC - إثبات كود الأمان وإيصال الدفع في #passcode]`,
-              description: `تم إرسال طلب تفعيل رتبة جديد مع صورة إيصال التحويل المرفقة أدناه. يرجى من مسؤول الرتب والدفع (**@${OWNER_DISCORD}**) مطابقة كود الأمان وصورة الإيصال مع تحويل فودافون كاش وتفعيل الرتبة للاعب فوراً في روم **#passcode**.`,
-              color: 0x00d2ff,
-              fields: [
-                { name: '🔑 كود الأمان (Passcode)', value: `\`\`\`${newPasscode}\`\`\``, inline: false },
-                { name: '📌 كود العملية الفريد', value: `\`${newOrderId}\``, inline: true },
-                { name: '👤 اسم اللاعب (IGN)', value: `**${targetPlayer}** (${platform.toUpperCase()})`, inline: true },
-                { name: '📦 الرتبة المطلوبة', value: `**${pkg.name}** (${pkg.tier || pkg.category})`, inline: true },
-                { name: '💰 المبلغ المحول', value: `**${pkg.egpPrice}**`, inline: true },
-                { name: '📱 رقم الهاتف المحول منه', value: `\`${senderPhone}\``, inline: true },
-                { name: '🔢 رقم الحوالة/العملية', value: `\`${transactionRef || 'تم إرسال الحوالة كاش'}\``, inline: true },
-                { name: '🌐 عنوان IP المشتري', value: `\`${clientIp || '127.0.0.1'}\``, inline: true },
-                { 
-                  name: '🧾 صورة الإيصال المرفقة', 
-                  value: paymentProofBase64 
-                    ? '✅ مرفق صورة الإيصال بالكامل أدناه' 
-                    : '⚠️ لم يرفق صورة إيصال', 
-                  inline: true 
-                },
-                { name: '👑 موجه مباشرة إلى مسؤول الرتب والدفع', value: `@${OWNER_DISCORD}`, inline: true },
-                { name: '🛡️ إدارة السيرفر', value: `@${CO_OWNER_DISCORD}`, inline: true },
-                { name: '💬 قناة السيرفر وروم الإثبات', value: `https://discord.gg/vUCeFXeUH (#passcode)`, inline: false },
-                { name: '⚡ أمر تفعيل الرتبة للكونسول', value: `\`\`\`${rankCommand}\`\`\``, inline: false },
-              ],
-              footer: { text: `VortexMC Store Security • روم #passcode • إيصال فودافون كاش المرفق` },
-              timestamp: new Date().toISOString(),
-            },
-          ],
-        };
-
-        let dispatched = false;
-        // First attempt: via server proxy /api/discord/webhook (handles multipart attachments safely)
-        try {
-          const proxyRes = await fetch('/api/discord/webhook', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              webhookUrl: activeWebhook,
-              payloadJson: payload,
-              imageBase64: paymentProofBase64 || undefined,
-              imageName: paymentProofName || `receipt_${newOrderId}.png`,
-            }),
-          });
-          if (proxyRes.ok) {
-            dispatched = true;
-          }
-        } catch {
-          // fallback to client-side dispatch
-        }
-
-        // Second attempt: direct client fetch if proxy didn't dispatch
-        if (!dispatched) {
-          if (paymentProofBase64) {
-            const match = paymentProofBase64.match(/^data:(image\/[a-zA-Z+]+);base64,(.+)$/);
-            const base64Data = match ? match[2] : paymentProofBase64;
-            const mimeType = match ? match[1] : 'image/png';
-            const byteCharacters = atob(base64Data);
-            const byteNumbers = new Array(byteCharacters.length);
-            for (let i = 0; i < byteCharacters.length; i++) {
-              byteNumbers[i] = byteCharacters.charCodeAt(i);
-            }
-            const byteArray = new Uint8Array(byteNumbers);
-            const blob = new Blob([byteArray], { type: mimeType });
-
-            const payloadCopy = JSON.parse(JSON.stringify(payload));
-            payloadCopy.embeds[0].image = { url: 'attachment://receipt.png' };
-
-            const fd = new FormData();
-            fd.append('files[0]', blob, 'receipt.png');
-            fd.append('payload_json', JSON.stringify(payloadCopy));
-
-            const directRes = await fetch(activeWebhook, {
-              method: 'POST',
-              body: fd,
-            });
-            if (directRes.ok) dispatched = true;
-          } else {
-            const directRes = await fetch(activeWebhook, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(payload),
-            });
-            if (directRes.ok) dispatched = true;
-          }
-        }
-
-        if (dispatched) {
-          setWebhookStatus('sent');
-        } else {
-          setWebhookStatus('failed');
-        }
+      if (notifyRes.ok) {
+        const json = await notifyRes.json().catch(() => ({}));
+        notificationDispatched = Boolean(json.dispatched ?? true);
+        setWebhookStatus(notificationDispatched ? 'sent' : 'idle');
       } else {
         setWebhookStatus('idle');
       }
-    } catch (err) {
-      console.error('Webhook dispatch error:', err);
-      setWebhookStatus('failed');
+    } catch (notifyErr: any) {
+      console.warn('Discord webhook request timed out or was blocked in preview:', notifyErr?.message || notifyErr);
+      setWebhookStatus('idle');
     }
 
-    setTimeout(() => {
-      setIsSubmitting(false);
-      setOrderSubmitted(true);
-    }, 700);
+    // Always release loading and transition immediately to the confirmed step
+    setIsSubmitting(false);
+    setOrderSubmitted(true);
+
+    if (notificationDispatched) {
+      setConfirmationNotice({
+        title: 'تم تأكيد طلبك وإرسال الإشعار بنجاح!',
+        desc: 'تم إرسال بيانات الطلب وصورة الإيصال إلى الديسكورد، وكود الأمان جاهز للتفعيل الفوري.',
+        type: 'success',
+      });
+      onCopyText('', '✅ تم تأكيد طلبك بنجاح وإرسال إشعار الديسكورد! كود الأمان جاهز.');
+    } else {
+      setConfirmationNotice({
+        title: 'تم تسجيل وتأكيد طلبك بنجاح في النظام!',
+        desc: 'تم توثيق طلبك وحفظه بنجاح، ويمكنك الآن استخدام كود الأمان في روم #passcode لتفعيل الرتبة.',
+        type: 'info',
+      });
+      onCopyText('', '✅ تم تأكيد طلبك بنجاح! كود الأمان جاهز للمتابعة في #passcode.');
+    }
   };
 
   // Receipt image link if hosted/accessible
@@ -564,19 +486,6 @@ ${receiptProofLine}
     a.click();
     document.body.removeChild(a);
     onCopyText('', '📥 تم بدء تحميل صورة الإيصال.');
-  };
-
-  const handleSaveWebhook = (e: React.FormEvent) => {
-    e.preventDefault();
-    const cleanUrl = tempWebhookInput.trim();
-    if (cleanUrl) {
-      localStorage.setItem('vortex_discord_passcode_webhook', cleanUrl);
-      setWebhookUrl(cleanUrl);
-      setWebhookSavedNotice(true);
-      setTimeout(() => setWebhookSavedNotice(false), 3000);
-      setShowWebhookSetup(false);
-      onCopyText('', 'تم حفظ رابط Webhook لروم #passcode بنجاح!');
-    }
   };
 
   const cleanPlayerLower = targetPlayer.trim().toLowerCase();
@@ -1131,13 +1040,13 @@ ${receiptProofLine}
             <div>
               <div className="text-xs font-bold text-[#39f77e] uppercase tracking-wider mb-1 flex items-center justify-center gap-1">
                 <ShieldCheck className="w-4 h-4" />
-                <span>تم تأكيد العملية وتوليد كود الأمان بنجاح!</span>
+                <span>{confirmationNotice?.title || 'تم تأكيد العملية وتوليد كود الأمان بنجاح!'}</span>
               </div>
               <h3 className="text-xl sm:text-2xl font-black text-white">
                 طلب رتبة {pkg.name}
               </h3>
-              <p className="text-slate-400 text-xs mt-1 max-w-md mx-auto">
-                أرسل كود الأمان هذا مباشرة في روم <strong className="text-[#00d2ff] font-bold">#passcode</strong> في سيرفر الديسكورد للتفعيل الفوري.
+              <p className="text-slate-300 text-xs mt-1 max-w-md mx-auto leading-relaxed">
+                {confirmationNotice?.desc || 'أرسل كود الأمان هذا مباشرة في روم #passcode في سيرفر الديسكورد للتفعيل الفوري.'}
               </p>
             </div>
 
@@ -1419,51 +1328,6 @@ ${receiptProofLine}
                 <Copy className="w-3.5 h-3.5" />
                 <span>📋 نسخ رسالة كود الأمان المنسقة لروم #passcode</span>
               </button>
-
-              {/* Automatic Discord Webhook Setting for el_joker_. */}
-              <div className="pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowWebhookSetup(!showWebhookSetup)}
-                  className="inline-flex items-center gap-1.5 text-[11px] text-slate-400 hover:text-slate-200 transition-colors cursor-pointer"
-                >
-                  <Settings className="w-3.5 h-3.5 text-[#00d2ff]" />
-                  <span>⚙️ إعداد الإرسال التلقائي المباشر لروم #passcode (Discord Webhook)</span>
-                </button>
-
-                {showWebhookSetup && (
-                  <form onSubmit={handleSaveWebhook} className="mt-2 p-3 bg-slate-950 rounded-xl border border-white/15 text-right space-y-2 text-xs animate-in fade-in">
-                    <div className="text-[11px] text-slate-300">
-                      لإرسال كود الأمان آلياً بدون الحاجة للنسخ واللصق:
-                      <ol className="list-decimal list-inside text-slate-400 mt-1 space-y-0.5 text-[10px]">
-                        <li>في الديسكورد، افتح إعدادات روم <strong>#passcode</strong></li>
-                        <li>اختر <strong>Integrations</strong> ثم <strong>Webhooks</strong> واضغط <strong>New Webhook</strong></li>
-                        <li>انسخ رابط الويب هوك والصقه هنا:</li>
-                      </ol>
-                    </div>
-                    <div className="flex gap-2">
-                      <input
-                        type="url"
-                        value={tempWebhookInput || webhookUrl}
-                        onChange={(e) => setTempWebhookInput(e.target.value)}
-                        placeholder="https://discord.com/api/webhooks/..."
-                        className="flex-1 bg-[#131c2d] border border-white/20 rounded-lg px-2.5 py-1.5 text-xs text-white font-mono outline-none focus:border-[#00d2ff]"
-                      />
-                      <button
-                        type="submit"
-                        className="px-3 py-1.5 bg-[#00d2ff] hover:bg-[#00b4dc] text-slate-950 font-bold text-xs rounded-lg transition-colors cursor-pointer"
-                      >
-                        حفظ
-                      </button>
-                    </div>
-                    {webhookSavedNotice && (
-                      <div className="text-emerald-400 text-[10px] font-bold">
-                        ✅ تم حفظ الرابط بنجاح! سيتم إرسال الأكواد مباشرة لروم #passcode.
-                      </div>
-                    )}
-                  </form>
-                )}
-              </div>
 
               <div className="p-2 rounded-xl bg-slate-950 border border-white/5 text-[11px] text-slate-400 text-center">
                 🛡️ رابط السيرفر وروم الإثبات: <span className="font-mono text-white font-bold">{DISCORD_SERVER_URL}</span>

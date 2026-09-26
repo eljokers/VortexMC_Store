@@ -19,7 +19,9 @@ import { StaffApplyPortal } from './components/StaffApply/StaffApplyPortal';
 import { LanguageSwitcher } from './components/LanguageSwitcher';
 import { Language } from './translations';
 import { ServerStatusData, StorePackage, UserProfile } from './types';
-import { subscribeToUserProfile, syncUserPurchases } from './services/api';
+import { subscribeToUserProfile, syncUserPurchases, getUserProfile } from './services/api';
+import { auth } from './firebase';
+import { onAuthStateChanged } from 'firebase/auth';
 import { Check } from 'lucide-react';
 
 const SERVER_IP = 'vortexmc.xyz';
@@ -68,6 +70,38 @@ export default function App() {
     }
   });
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+
+  // Synchronize Firebase Auth state on page load & refresh
+  useEffect(() => {
+    const unsubAuth = onAuthStateChanged(auth, async (fbUser) => {
+      if (fbUser) {
+        try {
+          const profile = await getUserProfile(fbUser.uid);
+          if (profile) {
+            setCurrentUser(profile);
+            localStorage.setItem('vortex_user_profile', JSON.stringify(profile));
+          } else {
+            const fallbackProfile: UserProfile = {
+              uid: fbUser.uid,
+              email: fbUser.email,
+              displayName: fbUser.displayName || 'Vortex Player',
+              photoURL: fbUser.photoURL,
+              provider: fbUser.providerData?.[0]?.providerId?.includes('google') ? 'google' : 'email',
+              purchaseCount: 0,
+              createdAt: new Date().toISOString(),
+              lastLoginAt: new Date().toISOString(),
+            };
+            setCurrentUser(fallbackProfile);
+            localStorage.setItem('vortex_user_profile', JSON.stringify(fallbackProfile));
+          }
+        } catch {
+          // ignore
+        }
+      }
+    });
+
+    return () => unsubAuth();
+  }, []);
 
   // Real-time synchronization of customer profile & purchase count
   useEffect(() => {

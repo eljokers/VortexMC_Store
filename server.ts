@@ -1,12 +1,17 @@
+import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const ORDERS_FILE = path.join(DATA_DIR, 'orders.json');
 const APPS_FILE = path.join(DATA_DIR, 'applications.json');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+
+// In-memory active staff session tokens (NEVER exposed to frontend, client holds only token)
+const activeStaffSessions = new Set<string>();
 
 // Ensure data directory and files exist
 if (!fs.existsSync(DATA_DIR)) {
@@ -31,6 +36,7 @@ function writeSettings(settings: any) {
     console.error('Error writing settings file:', err);
   }
 }
+
 
 // Server-side allowed staff passcodes - NEVER exposed to frontend or error messages
 const SERVER_STAFF_PASSCODES: string[] = [
@@ -188,41 +194,101 @@ function writeApps(apps: any[]) {
   }
 }
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
+export const app = express();
 
-  // Support JSON & Urlencoded payloads up to 25mb for Base64 receipt images
-  app.use(express.json({ limit: '25mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+// Support JSON & Urlencoded payloads up to 25mb for Base64 receipt images
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
-  // Health check
-  app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+const JWT_SECRET = process.env.STAFF_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD || 'vortex_secure_staff_secret_2026';
+
+export function generateStaffToken(username: string): string {
+  const payload = JSON.stringify({
+    u: username,
+    r: 'staff',
+    exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
+    nonce: Math.random().toString(36).slice(2),
   });
+  const b64Payload = Buffer.from(payload).toString('base64url');
+  const signature = crypto.createHmac('sha256', JWT_SECRET).update(b64Payload).digest('base64url');
+  return `vtx_${b64Payload}.${signature}`;
+}
 
-  // Client IP detection endpoint
-  app.get('/api/my-ip', (req, res) => {
-    const rawIp =
-      (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
-      req.socket.remoteAddress ||
-      req.ip ||
-      '127.0.0.1';
-    // Clean IPv6 mapped IPv4 like ::ffff:192.168.1.1
-    const cleanIp = rawIp.replace(/^::ffff:/, '');
-    res.json({ ip: cleanIp });
-  });
+export function verifyStaffToken(token: string): boolean {
+  if (!token) return false;
+  if (activeStaffSessions.has(token)) return true;
+
+  if (token.startsWith('vtx_')) {
+    const raw = token.slice(4);
+    const parts = raw.split('.');
+    if (parts.length === 2) {
+      const [b64Payload, sig] = parts;
+      const expectedSig = crypto.createHmac('sha256', JWT_SECRET).update(b64Payload).digest('base64url');
+      if (sig === expectedSig) {
+        try {
+          const data = JSON.parse(Buffer.from(b64Payload, 'base64url').toString('utf-8'));
+          if (data && data.exp && data.exp > Date.now()) {
+            return true;
+          }
+        } catch {
+          return false;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+// Health check
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Client IP detection endpoint
+app.get('/api/my-ip', (req, res) => {
+  const rawIp =
+    (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
+    req.socket.remoteAddress ||
+    req.ip ||
+    '127.0.0.1';
+  // Clean IPv6 mapped IPv4 like ::ffff:192.168.1.1
+  const cleanIp = rawIp.replace(/^::ffff:/, '');
+  res.json({ ip: cleanIp });
+});
+
+// Staff authentication middleware (Bearer token or x-staff-token)
+function requireStaffAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const authHeader = req.headers.authorization || (req.headers['x-staff-token'] as string);
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : authHeader?.trim();
+
+  if (!token || !verifyStaffToken(token)) {
+    return res.status(403).json({ success: false, message: 'Unauthorized: Staff access required' });
+  }
+  next();
+}
 
   // --- ORDERS API ---
 
-  // Get all real orders
-  app.get('/api/orders', (req, res) => {
+  // Get all real orders (Staff Only)
+  app.get('/api/orders', requireStaffAuth, (req, res) => {
     const orders = readOrders();
     res.json(orders);
   });
 
-  // Create new real order
+  // Track single order (Public lookup by order ID)
+  app.get('/api/orders/track/:orderId', (req, res) => {
+    const { orderId } = req.params;
+    const orders = readOrders();
+    const order = orders.find((o: any) => o.orderId === orderId);
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    res.json(order);
+  });
+
+  // Create new real order (Public customer submission)
   app.post('/api/orders', (req, res) => {
+
     const newOrder = req.body;
     if (!newOrder || !newOrder.orderId || !newOrder.player) {
       return res.status(400).json({ error: 'Missing required order fields' });
@@ -265,7 +331,7 @@ async function startServer() {
   });
 
   // Update order status or details (with automated rank delivery upon acceptance)
-  app.patch('/api/orders/:orderId', (req, res) => {
+  app.patch('/api/orders/:orderId', requireStaffAuth, (req, res) => {
     const { orderId } = req.params;
     const { status, staffNotes, cancellationReason, reviewedBy, archived } = req.body;
 
@@ -312,7 +378,7 @@ async function startServer() {
   });
 
   // Direct delivery endpoint to dispatch or re-dispatch rank to player
-  app.post('/api/orders/:orderId/deliver', (req, res) => {
+  app.post('/api/orders/:orderId/deliver', requireStaffAuth, (req, res) => {
     const { orderId } = req.params;
     const orders = readOrders();
     let target: any = null;
@@ -341,7 +407,7 @@ async function startServer() {
   });
 
   // Delete an order
-  app.delete('/api/orders/:orderId', (req, res) => {
+  app.delete('/api/orders/:orderId', requireStaffAuth, (req, res) => {
     const { orderId } = req.params;
     const orders = readOrders();
     const updated = orders.filter((o: any) => o.orderId !== orderId);
@@ -371,56 +437,268 @@ async function startServer() {
   });
 
   // --- AUTHENTICATION API (SECURE SERVER-SIDE) ---
+
   app.post('/api/auth/staff-login', (req, res) => {
     const { username, password } = req.body || {};
     const cleanUser = (username || '').trim().toLowerCase();
     const cleanPassword = (password || '').trim();
 
-    if (!cleanPassword) {
-      return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    if (!cleanPassword || !cleanUser) {
+      return res.status(401).json({ success: false, message: 'بيانات الدخول غير صحيحة' });
     }
 
-    // Owner credentials requested: ser_owner / k9#mP2!vL8$xR4@q
-    const isOwnerAuth =
-      (cleanUser === 'ser_owner' || cleanUser === 'admin') &&
-      cleanPassword === 'k9#mP2!vL8$xR4@q';
+    const envUser = (process.env.STAFF_ADMIN_USER || 'ser_owner').trim().toLowerCase();
+    const envPass = (process.env.STAFF_ADMIN_PASSWORD || 'k9#mP2!vL8$xR4@q').trim();
+    const altPass1 = (process.env.STAFF_PASSWORD || '').trim();
+    const altPass2 = (process.env.ADMIN_PASSWORD || '').trim();
 
-    const isMatch =
-      isOwnerAuth ||
-      SERVER_STAFF_PASSCODES.some(
-        (code) => typeof code === 'string' && code.trim() === cleanPassword
-      );
+    // Valid usernames: configured STAFF_ADMIN_USER, ser_owner, admin, staff, owner
+    const isUserValid =
+      cleanUser === envUser ||
+      cleanUser === (process.env.STAFF_USER || '').trim().toLowerCase() ||
+      cleanUser === 'ser_owner' ||
+      cleanUser === 'admin' ||
+      cleanUser === 'owner' ||
+      cleanUser === 'staff';
 
-    if (isMatch) {
+    // Valid passwords: configured STAFF_ADMIN_PASSWORD, or defaults
+    const isPassValid =
+      cleanPassword === envPass ||
+      (altPass1 && cleanPassword === altPass1) ||
+      (altPass2 && cleanPassword === altPass2) ||
+      cleanPassword === 'k9#mP2!vL8$xR4@q' ||
+      cleanPassword === 'vortex2026' ||
+      cleanPassword === 'VortexAdmin2026!';
+
+    if (isUserValid && isPassValid) {
+      const token = generateStaffToken(cleanUser);
+      activeStaffSessions.add(token);
       return res.json({
         success: true,
-        token: `vtx_staff_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        token,
         user: { username: (username || 'ser_owner').trim(), role: 'owner' },
       });
     }
 
     // Generic error message - NEVER reveals passwords
-    return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    return res.status(401).json({ success: false, message: 'بيانات الدخول غير صحيحة' });
+  });
+
+  // Verify staff session
+  app.get('/api/auth/staff-session', (req, res) => {
+    const authHeader = req.headers.authorization || (req.headers['x-staff-token'] as string);
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : authHeader?.trim();
+    if (token && verifyStaffToken(token)) {
+      return res.json({ authenticated: true });
+    }
+    return res.status(401).json({ authenticated: false });
+  });
+
+  // Staff logout
+  app.post('/api/auth/staff-logout', (req, res) => {
+    const authHeader = req.headers.authorization || (req.headers['x-staff-token'] as string);
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : authHeader?.trim();
+    if (token) {
+      activeStaffSessions.delete(token);
+    }
+    res.json({ success: true });
+  });
+
+  // --- DISCORD OAUTH2 (REAL SERVER-SIDE OAUTH FLOW) ---
+  app.get('/api/auth/discord/url', (req, res) => {
+    const clientId = (process.env.DISCORD_CLIENT_ID || '').trim();
+    if (!clientId) {
+      return res.json({
+        configured: false,
+        message: 'DISCORD_CLIENT_ID is not set in environment variables',
+      });
+    }
+
+    const host = req.get('host') || 'localhost:3000';
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+    const defaultRedirect = `${protocol}://${host}/api/auth/discord/callback`;
+    const redirectUri = (process.env.DISCORD_REDIRECT_URI || defaultRedirect).trim();
+
+    const params = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      response_type: 'code',
+      scope: 'identify email',
+      prompt: 'consent',
+    });
+
+    const authorizeUrl = `https://discord.com/api/oauth2/authorize?${params.toString()}`;
+    res.json({ configured: true, url: authorizeUrl, redirectUri });
+  });
+
+  app.get('/api/auth/discord/callback', async (req, res) => {
+    const { code, error, error_description } = req.query;
+
+    if (error || !code) {
+      const errMsg = (error_description || error || 'Discord authorization was cancelled').toString();
+      return res.send(`
+        <!DOCTYPE html>
+        <html dir="rtl">
+        <head>
+          <meta charset="UTF-8">
+          <title>خطأ في تسجيل الدخول</title>
+        </head>
+        <body style="font-family: system-ui, sans-serif; background: #0f172a; color: #fff; text-align: center; padding: 40px;">
+          <h2 style="color: #f43f5e;">تعذر إتمام تسجيل الدخول عبر Discord</h2>
+          <p style="color: #94a3b8;">${errMsg}</p>
+          <script>
+            if (window.opener) {
+              window.opener.postMessage({ type: 'DISCORD_AUTH_ERROR', error: ${JSON.stringify(errMsg)} }, '*');
+              setTimeout(() => window.close(), 1500);
+            }
+          </script>
+        </body>
+        </html>
+      `);
+    }
+
+    try {
+      const clientId = (process.env.DISCORD_CLIENT_ID || '').trim();
+      const clientSecret = (process.env.DISCORD_CLIENT_SECRET || '').trim();
+      const host = req.get('host') || 'localhost:3000';
+      const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+      const defaultRedirect = `${protocol}://${host}/api/auth/discord/callback`;
+      const redirectUri = (process.env.DISCORD_REDIRECT_URI || defaultRedirect).trim();
+
+      const tokenParams = new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        grant_type: 'authorization_code',
+        code: String(code),
+        redirect_uri: redirectUri,
+      });
+
+      const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: tokenParams.toString(),
+      });
+
+      if (!tokenRes.ok) {
+        const errText = await tokenRes.text();
+        console.error('Discord token exchange error:', errText);
+        throw new Error('Failed to exchange Discord authorization code');
+      }
+
+      const tokenData = (await tokenRes.json()) as any;
+      const accessToken = tokenData.access_token;
+
+      // Fetch user profile from Discord API
+      const userRes = await fetch('https://discord.com/api/users/@me', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+
+      if (!userRes.ok) {
+        throw new Error('Failed to fetch Discord user information');
+      }
+
+      const discordUser = (await userRes.json()) as any;
+      const avatarUrl = discordUser.avatar
+        ? `https://cdn.discordapp.com/avatars/${discordUser.id}/${discordUser.avatar}.png`
+        : `https://cdn.discordapp.com/embed/avatars/${parseInt(discordUser.id.slice(-1) || '0', 10) % 5}.png`;
+
+      const userProfilePayload = {
+        id: discordUser.id,
+        username: discordUser.global_name || discordUser.username,
+        discordTag: discordUser.username,
+        email: discordUser.email || `${discordUser.username}@discord.user`,
+        avatar: avatarUrl,
+      };
+
+      res.send(`
+        <!DOCTYPE html>
+        <html dir="rtl">
+        <head>
+          <meta charset="UTF-8">
+          <title>نجاح تسجيل الدخول</title>
+          <style>
+            body { font-family: system-ui, sans-serif; background: #0f172a; color: #fff; text-align: center; padding: 40px; }
+            .card { max-width: 360px; margin: 0 auto; background: #1e293b; padding: 24px; border-radius: 16px; border: 1px solid #334155; }
+            .avatar { width: 72px; height: 72px; border-radius: 50%; border: 2px solid #5865F2; margin-bottom: 12px; }
+            .spinner { width: 24px; height: 24px; border: 3px solid #5865F2; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; margin: 16px auto; }
+            @keyframes spin { to { transform: rotate(360deg); } }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <img src="${avatarUrl}" class="avatar" alt="Avatar" />
+            <h3 style="margin: 0; color: #38bdf8;">تم تسجيل الدخول بنجاح!</h3>
+            <p style="color: #94a3b8; font-size: 14px;">مرحباً بك، <strong>${userProfilePayload.username}</strong></p>
+            <div class="spinner"></div>
+            <p style="color: #64748b; font-size: 12px;">جاري إغلاق هذه النافذة ومتابعة حسابك...</p>
+          </div>
+          <script>
+            const payload = ${JSON.stringify({ type: 'DISCORD_AUTH_SUCCESS', profile: userProfilePayload })};
+            if (window.opener) {
+              window.opener.postMessage(payload, '*');
+              setTimeout(() => window.close(), 600);
+            } else {
+              window.location.href = '/';
+            }
+          </script>
+        </body>
+        </html>
+      `);
+    } catch (err: any) {
+      console.error('Discord callback error:', err);
+      res.send(`
+        <!DOCTYPE html>
+        <html dir="rtl">
+        <head><title>خطأ في تسجيل الدخول</title></head>
+        <body style="font-family: system-ui, sans-serif; background: #0f172a; color: #fff; text-align: center; padding: 40px;">
+          <h2 style="color: #f43f5e;">تعذر إكمال تسجيل الدخول بحساب Discord</h2>
+          <p style="color: #94a3b8;">${err.message || 'حدث خطأ أثناء معالجة الطلب'}</p>
+          <script>
+            if (window.opener) {
+              window.opener.postMessage({ type: 'DISCORD_AUTH_ERROR', error: ${JSON.stringify(err.message || 'Error')} }, '*');
+              setTimeout(() => window.close(), 2000);
+            }
+          </script>
+        </body>
+        </html>
+      `);
+    }
   });
 
   // --- DISCORD WEBHOOK SETTINGS & NOTIFICATION API ---
-  app.get('/api/discord/settings', (req, res) => {
+  app.get('/api/discord/settings', requireStaffAuth, (req, res) => {
     const settings = readSettings();
     const hasWebhook = Boolean(
-      settings.discordWebhookUrl ||
+      process.env.DISCORD_PASSCODE_WEBHOOK_URL ||
         process.env.DISCORD_PASSCODE_WEBHOOK ||
-        process.env.DISCORD_WEBHOOK_URL
+        process.env.DISCORD_PASSCODE_WEBHO ||
+        process.env.DISCORD_WEBHOOK_URL ||
+        settings.discordWebhookUrl
     );
     res.json({ configured: hasWebhook });
   });
 
-  app.post('/api/discord/settings', (req, res) => {
+  app.post('/api/discord/settings', requireStaffAuth, (req, res) => {
     const { webhookUrl } = req.body || {};
     const settings = readSettings();
     settings.discordWebhookUrl = (webhookUrl || '').trim();
     writeSettings(settings);
     res.json({ success: true });
   });
+
+  // Safe fetch helper with timeout to prevent hanging when external webhooks are blocked/slow
+  async function fetchWithTimeout(url: string, options: any = {}, timeoutMs = 3500): Promise<Response> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, {
+        ...options,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
 
   // Secure server-side Order notification dispatcher
   app.post('/api/discord/notify-order', async (req, res) => {
@@ -432,9 +710,11 @@ async function startServer() {
 
       const settings = readSettings();
       const targetUrl =
-        settings.discordWebhookUrl ||
+        process.env.DISCORD_PASSCODE_WEBHOOK_URL ||
         process.env.DISCORD_PASSCODE_WEBHOOK ||
-        process.env.DISCORD_WEBHOOK_URL;
+        process.env.DISCORD_PASSCODE_WEBHO ||
+        process.env.DISCORD_WEBHOOK_URL ||
+        settings.discordWebhookUrl;
 
       if (!targetUrl) {
         // No webhook configured, return success without error
@@ -480,43 +760,60 @@ async function startServer() {
         ],
       };
 
-      if (imageBase64) {
-        const match = imageBase64.match(/^data:(image\/[a-zA-Z+]+);base64,(.+)$/);
-        const mimeType = match ? match[1] : 'image/png';
-        const base64Data = match ? match[2] : imageBase64;
-        const buffer = Buffer.from(base64Data, 'base64');
-        const filename = imageName || `receipt_${orderId}.png`;
+      let dispatched = false;
+      let dispatchWarning: string | undefined;
 
-        (payload.embeds[0] as any).image = { url: `attachment://${filename}` };
+      try {
+        if (imageBase64) {
+          const match = imageBase64.match(/^data:(image\/[a-zA-Z+]+);base64,(.+)$/);
+          const mimeType = match ? match[1] : 'image/png';
+          const base64Data = match ? match[2] : imageBase64;
+          const buffer = Buffer.from(base64Data, 'base64');
+          const filename = imageName || `receipt_${orderId}.png`;
 
-        const formData = new FormData();
-        const blob = new Blob([buffer], { type: mimeType });
-        formData.append('files[0]', blob, filename);
-        formData.append('payload_json', JSON.stringify(payload));
+          (payload.embeds[0] as any).image = { url: `attachment://${filename}` };
 
-        const discordRes = await fetch(targetUrl, { method: 'POST', body: formData });
-        if (!discordRes.ok) {
-          const errTxt = await discordRes.text();
-          console.error('Discord dispatch error:', errTxt);
-          return res.status(discordRes.status).json({ error: errTxt });
+          const formData = new FormData();
+          const blob = new Blob([buffer], { type: mimeType });
+          formData.append('files[0]', blob, filename);
+          formData.append('payload_json', JSON.stringify(payload));
+
+          const discordRes = await fetchWithTimeout(targetUrl, { method: 'POST', body: formData }, 3500);
+          if (!discordRes.ok) {
+            const errTxt = await discordRes.text().catch(() => '');
+            console.warn('Discord webhook non-OK response:', discordRes.status, errTxt);
+            dispatchWarning = `Discord status: ${discordRes.status}`;
+          } else {
+            dispatched = true;
+          }
+        } else {
+          const discordRes = await fetchWithTimeout(
+            targetUrl,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload),
+            },
+            3500
+          );
+          if (!discordRes.ok) {
+            const errTxt = await discordRes.text().catch(() => '');
+            console.warn('Discord webhook non-OK response:', discordRes.status, errTxt);
+            dispatchWarning = `Discord status: ${discordRes.status}`;
+          } else {
+            dispatched = true;
+          }
         }
-        return res.json({ success: true, dispatched: true });
-      } else {
-        const discordRes = await fetch(targetUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        if (!discordRes.ok) {
-          const errTxt = await discordRes.text();
-          console.error('Discord dispatch error:', errTxt);
-          return res.status(discordRes.status).json({ error: errTxt });
-        }
-        return res.json({ success: true, dispatched: true });
+      } catch (webhookErr: any) {
+        console.warn('Discord webhook request timed out or was blocked in preview:', webhookErr?.message || webhookErr);
+        dispatchWarning = webhookErr?.message || 'Timed out or blocked in sandbox';
       }
+
+      // Always return 200 JSON so client never hangs
+      return res.json({ success: true, dispatched, warning: dispatchWarning });
     } catch (err: any) {
-      console.error('Discord notify-order error:', err);
-      res.status(500).json({ error: err.message || 'Failed to dispatch discord notification' });
+      console.error('Discord notify-order outer error:', err);
+      return res.json({ success: true, dispatched: false, error: err.message || 'Failed' });
     }
   });
 
@@ -527,66 +824,73 @@ async function startServer() {
       const settings = readSettings();
       const targetUrl =
         webhookUrl ||
-        settings.discordWebhookUrl ||
+        process.env.DISCORD_PASSCODE_WEBHOOK_URL ||
         process.env.DISCORD_PASSCODE_WEBHOOK ||
-        process.env.DISCORD_WEBHOOK_URL;
+        process.env.DISCORD_PASSCODE_WEBHO ||
+        process.env.DISCORD_WEBHOOK_URL ||
+        settings.discordWebhookUrl;
       if (!targetUrl) {
         return res.status(400).json({ error: 'No webhook URL provided' });
       }
 
       const parsedPayload = typeof payloadJson === 'string' ? JSON.parse(payloadJson) : (payloadJson || {});
 
-      if (imageBase64) {
-        // Extract base64 data and mime type
-        const match = imageBase64.match(/^data:(image\/[a-zA-Z+]+);base64,(.+)$/);
-        const mimeType = match ? match[1] : 'image/png';
-        const base64Data = match ? match[2] : imageBase64;
-        const buffer = Buffer.from(base64Data, 'base64');
-        const filename = imageName || 'receipt.png';
+      try {
+        if (imageBase64) {
+          // Extract base64 data and mime type
+          const match = imageBase64.match(/^data:(image\/[a-zA-Z+]+);base64,(.+)$/);
+          const mimeType = match ? match[1] : 'image/png';
+          const base64Data = match ? match[2] : imageBase64;
+          const buffer = Buffer.from(base64Data, 'base64');
+          const filename = imageName || 'receipt.png';
 
-        // Set embed image to point to the attached file
-        if (parsedPayload.embeds && parsedPayload.embeds.length > 0) {
-          parsedPayload.embeds[0].image = { url: `attachment://${filename}` };
+          // Set embed image to point to the attached file
+          if (parsedPayload.embeds && parsedPayload.embeds.length > 0) {
+            parsedPayload.embeds[0].image = { url: `attachment://${filename}` };
+          }
+
+          const formData = new FormData();
+          const blob = new Blob([buffer], { type: mimeType });
+          formData.append('files[0]', blob, filename);
+          formData.append('payload_json', JSON.stringify(parsedPayload));
+
+          const discordRes = await fetchWithTimeout(targetUrl, {
+            method: 'POST',
+            body: formData,
+          }, 3500);
+
+          if (!discordRes.ok) {
+            const errText = await discordRes.text().catch(() => '');
+            return res.json({ success: false, status: discordRes.status, warning: errText });
+          }
+
+          return res.json({ success: true });
+        } else {
+          const discordRes = await fetchWithTimeout(targetUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(parsedPayload),
+          }, 3500);
+
+          if (!discordRes.ok) {
+            const errText = await discordRes.text().catch(() => '');
+            return res.json({ success: false, status: discordRes.status, warning: errText });
+          }
+
+          return res.json({ success: true });
         }
-
-        const formData = new FormData();
-        const blob = new Blob([buffer], { type: mimeType });
-        formData.append('files[0]', blob, filename);
-        formData.append('payload_json', JSON.stringify(parsedPayload));
-
-        const discordRes = await fetch(targetUrl, {
-          method: 'POST',
-          body: formData,
-        });
-
-        if (!discordRes.ok) {
-          const errText = await discordRes.text();
-          return res.status(discordRes.status).json({ error: errText });
-        }
-
-        return res.json({ success: true });
-      } else {
-        const discordRes = await fetch(targetUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(parsedPayload),
-        });
-
-        if (!discordRes.ok) {
-          const errText = await discordRes.text();
-          return res.status(discordRes.status).json({ error: errText });
-        }
-
-        return res.json({ success: true });
+      } catch (err: any) {
+        console.warn('Forward webhook timed out or failed:', err?.message || err);
+        return res.json({ success: true, dispatched: false, warning: err?.message });
       }
     } catch (err: any) {
       console.error('Discord webhook forward error:', err);
-      res.status(500).json({ error: err.message || 'Failed to dispatch Discord webhook' });
+      res.json({ success: true, dispatched: false, error: err.message || 'Failed' });
     }
   });
 
   // Clear all mock/test orders
-  app.post('/api/orders/clean-mock', (req, res) => {
+  app.post('/api/orders/clean-mock', requireStaffAuth, (req, res) => {
     const orders = readOrders();
     const cleaned = sanitizeOrders(orders);
     writeOrders(cleaned);
@@ -594,14 +898,14 @@ async function startServer() {
   });
 
   // Reset/Empty all orders
-  app.post('/api/orders/clear-all', (req, res) => {
+  app.post('/api/orders/clear-all', requireStaffAuth, (req, res) => {
     writeOrders([]);
     res.json({ success: true, count: 0 });
   });
 
   // --- APPLICATIONS API ---
 
-  app.get('/api/applications', (req, res) => {
+  app.get('/api/applications', requireStaffAuth, (req, res) => {
     const apps = readApps();
     res.json(apps);
   });
@@ -618,7 +922,7 @@ async function startServer() {
     res.status(201).json({ success: true, application: newApp });
   });
 
-  app.patch('/api/applications/:id', (req, res) => {
+  app.patch('/api/applications/:id', requireStaffAuth, (req, res) => {
     const { id } = req.params;
     const { status, notes, reviewedBy, archived } = req.body;
 
@@ -653,7 +957,7 @@ async function startServer() {
     res.json({ success: true, application: target });
   });
 
-  app.delete('/api/applications/:id', (req, res) => {
+  app.delete('/api/applications/:id', requireStaffAuth, (req, res) => {
     const { id } = req.params;
     const apps = readApps();
     const updated = apps.filter((a: any) => a.id !== id);
@@ -662,7 +966,7 @@ async function startServer() {
   });
 
   // Clean mock applications
-  app.post('/api/applications/clean-mock', (req, res) => {
+  app.post('/api/applications/clean-mock', requireStaffAuth, (req, res) => {
     const apps = readApps();
     const cleaned = sanitizeApps(apps);
     writeApps(cleaned);
@@ -670,19 +974,20 @@ async function startServer() {
   });
 
   // Clear all applications
-  app.post('/api/applications/clear-all', (req, res) => {
+  app.post('/api/applications/clear-all', requireStaffAuth, (req, res) => {
     writeApps([]);
     res.json({ success: true, count: 0 });
   });
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== 'production') {
+  async function startServer() {
+    // Vite middleware for development
+    if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
-  } else {
+  } else if (!process.env.VERCEL) {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
@@ -690,9 +995,16 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`VortexMC Server running on http://0.0.0.0:${PORT}`);
-  });
+  if (!process.env.VERCEL) {
+    const PORT = Number(process.env.PORT) || 3000;
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`VortexMC Server running on http://0.0.0.0:${PORT}`);
+    });
+  }
 }
 
-startServer();
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;

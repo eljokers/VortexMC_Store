@@ -12,8 +12,10 @@ import {
   loginWithEmail, 
   userLogout,
   syncUserPurchases,
-  fetchOrders
+  fetchOrders,
+  fetchDiscordOAuthUrl
 } from '../services/api';
+
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -81,6 +83,40 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   if (!isOpen) return null;
 
+  // Listen for Discord OAuth popup postMessage
+  useEffect(() => {
+    const handleOAuthMessage = async (event: MessageEvent) => {
+      if (event.data?.type === 'DISCORD_AUTH_SUCCESS' && event.data.profile) {
+        setIsLoading(true);
+        setErrorMsg('');
+        try {
+          const dcProfile = event.data.profile;
+          const savedIgn = localStorage.getItem('vortex_mc_ign') || minecraftIgn || undefined;
+          const profile = await signInWithDiscord({
+            id: dcProfile.id,
+            username: dcProfile.username,
+            avatar: dcProfile.avatar,
+            minecraftIgn: savedIgn,
+          });
+          onUserChanged(profile);
+          setSuccessMsg(`تم تسجيل الدخول بحساب ديسكورد @${dcProfile.username} بنجاح! 🎉`);
+          await loadUserOrders(profile);
+        } catch (err: any) {
+          console.error('Error saving Discord profile:', err);
+          setErrorMsg('تعذر ربط بيانات الديسكورد، يرجى المحاولة لاحقاً');
+        } finally {
+          setIsLoading(false);
+        }
+      } else if (event.data?.type === 'DISCORD_AUTH_ERROR') {
+        setErrorMsg(event.data.error || 'تعذر إتمام تسجيل الدخول عبر ديسكورد');
+        setIsLoading(false);
+      }
+    };
+
+    window.addEventListener('message', handleOAuthMessage);
+    return () => window.removeEventListener('message', handleOAuthMessage);
+  }, [minecraftIgn]);
+
   // Handle Google Sign In
   const handleGoogleSignIn = async () => {
     setIsLoading(true);
@@ -93,16 +129,60 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       await loadUserOrders(profile);
     } catch (err: any) {
       console.error('Google Sign In Error:', err);
-      setErrorMsg(err.message?.includes('popup-closed') 
-        ? 'تم إغلاق نافذة تسجيل الدخول' 
-        : 'تعذر تسجيل الدخول بحساب Google، يرجى المحاولة مجدداً');
+      if (err.code === 'auth/unauthorized-domain') {
+        setErrorMsg('النطاق الحالي غير مسجل في Firebase Authorized Domains. يرجى إضافته في Firebase Console > Authentication > Settings.');
+      } else if (err.code === 'auth/popup-blocked') {
+        setErrorMsg('تم حظر النافذة المنبثقة من المتصفح. يرجى السماح بالنوافذ المنبثقة (Popups).');
+      } else if (err.code === 'auth/popup-closed-by-user' || err.message?.includes('popup-closed')) {
+        setErrorMsg('تم إغلاق نافذة تسجيل الدخول قبل إتمام العملية.');
+      } else {
+        setErrorMsg(err.message || 'تعذر تسجيل الدخول بحساب Google، يرجى المحاولة مجدداً');
+      }
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Handle Discord Sign In Submit
+  // Handle Discord OAuth Login Trigger
+  const handleDiscordOAuthClick = async () => {
+    setIsLoading(true);
+    setErrorMsg('');
+    try {
+      const authData = await fetchDiscordOAuthUrl();
+      if (!authData.configured || !authData.url) {
+        // If Discord client credentials are not set in environment, fallback to modal prompt
+        setIsDiscordPromptOpen(true);
+        setIsLoading(false);
+        return;
+      }
+
+      const width = 560;
+      const height = 740;
+      const left = window.screenX + (window.outerWidth - width) / 2;
+      const top = window.screenY + (window.outerHeight - height) / 2;
+
+      const popup = window.open(
+        authData.url,
+        'discord_oauth',
+        `width=${width},height=${height},left=${left},top=${top},status=no,toolbar=no,menubar=no`
+      );
+
+      if (!popup || popup.closed) {
+        setErrorMsg('تم حظر النافذة المنبثقة من المتصفح. يرجى السماح بالنوافذ المنبثقة (Popups) للمتابعة.');
+        setIsLoading(false);
+        return;
+      }
+    } catch (err: any) {
+      console.error('Failed to initiate Discord OAuth:', err);
+      setIsDiscordPromptOpen(true);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Handle Discord Sign In Submit (Fallback prompt)
   const handleDiscordSubmit = async (e: React.FormEvent) => {
+
     e.preventDefault();
     const cleanUser = discordUsername.trim();
     if (!cleanUser) {
@@ -475,10 +555,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               {/* Discord Button */}
               <button
                 type="button"
-                onClick={() => {
-                  setErrorMsg('');
-                  setIsDiscordPromptOpen(true);
-                }}
+                onClick={handleDiscordOAuthClick}
                 disabled={isLoading}
                 className="flex items-center justify-center gap-2.5 py-3 px-4 rounded-xl bg-[#5865F2] hover:bg-[#4752C4] text-white font-black text-xs transition-all shadow-md hover:shadow-lg cursor-pointer disabled:opacity-60"
               >
