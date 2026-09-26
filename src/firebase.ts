@@ -17,11 +17,19 @@ export const firebaseConfig = {
 export const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
 // Target Firestore Database ID
+// If custom VITE_FIREBASE_PROJECT_ID is configured without VITE_FIREBASE_DATABASE_ID, standard '(default)' is used.
+const isCustomProject = Boolean(
+  import.meta.env.VITE_FIREBASE_PROJECT_ID &&
+  import.meta.env.VITE_FIREBASE_PROJECT_ID !== firebaseConfigJson.projectId
+);
+
 const customDbId =
   (import.meta.env.VITE_FIREBASE_DATABASE_ID as string) ||
-  (firebaseConfigJson.firestoreDatabaseId && firebaseConfigJson.firestoreDatabaseId !== '(default)'
-    ? firebaseConfigJson.firestoreDatabaseId
-    : undefined);
+  (isCustomProject
+    ? undefined
+    : (firebaseConfigJson.firestoreDatabaseId && firebaseConfigJson.firestoreDatabaseId !== '(default)'
+      ? firebaseConfigJson.firestoreDatabaseId
+      : undefined));
 
 // Initialize Cloud Firestore with dedicated database ID
 export const db = getFirestore(app, customDbId);

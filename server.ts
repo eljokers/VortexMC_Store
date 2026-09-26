@@ -200,6 +200,24 @@ export const app = express();
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
+// Ensure incoming requests under /api match whether Vercel preserved or stripped the /api prefix
+app.use((req, _res, next) => {
+  if (
+    req.url &&
+    !req.url.startsWith('/api') &&
+    (req.url.startsWith('/discord') ||
+      req.url.startsWith('/orders') ||
+      req.url.startsWith('/auth') ||
+      req.url.startsWith('/health') ||
+      req.url.startsWith('/applications') ||
+      req.url.startsWith('/settings') ||
+      req.url.startsWith('/my-ip'))
+  ) {
+    req.url = '/api' + req.url;
+  }
+  next();
+});
+
 const JWT_SECRET = process.env.STAFF_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD || 'vortex_secure_staff_secret_2026';
 
 export function generateStaffToken(username: string): string {
@@ -1003,7 +1021,10 @@ function requireStaffAuth(req: express.Request, res: express.Response, next: exp
   }
 }
 
-if (!process.env.VERCEL) {
+const isDirectExecution =
+  Boolean(process.argv[1] && (process.argv[1].endsWith('server.ts') || process.argv[1].endsWith('server.cjs') || process.argv[1].endsWith('server.js')));
+
+if (!process.env.VERCEL && !process.env.VERCEL_ENV && isDirectExecution) {
   startServer();
 }
 
